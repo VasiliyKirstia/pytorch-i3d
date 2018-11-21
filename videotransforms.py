@@ -2,7 +2,8 @@ import numpy as np
 import numbers
 import random
 
-class RandomCrop(object):
+
+class RandomCrop:
     """Crop the given video sequences (t x h x w) at a random location.
     Args:
         size (sequence or int): Desired output size of the crop. If size is an
@@ -44,7 +45,8 @@ class RandomCrop(object):
     def __repr__(self):
         return self.__class__.__name__ + '(size={0})'.format(self.size)
 
-class CenterCrop(object):
+
+class CenterCrop:
     """Crops the given seq Images at the center.
     Args:
         size (sequence or int): Desired output size of the crop. If size is an
@@ -77,7 +79,7 @@ class CenterCrop(object):
         return self.__class__.__name__ + '(size={0})'.format(self.size)
 
 
-class RandomHorizontalFlip(object):
+class RandomHorizontalFlip:
     """Horizontally flip the given seq Images randomly with a given probability.
     Args:
         p (float): probability of the image being flipped. Default value is 0.5

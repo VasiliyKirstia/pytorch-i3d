@@ -1,51 +1,38 @@
-import os
-os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"   
-import sys
 import argparse
-
-parser = argparse.ArgumentParser()
-parser.add_argument('-mode', type=str, help='rgb or flow')
-parser.add_argument('-load_model', type=str)
-parser.add_argument('-root', type=str)
-parser.add_argument('-gpu', type=str)
-parser.add_argument('-save_dir', type=str)
-
-args = parser.parse_args()
-os.environ["CUDA_VISIBLE_DEVICES"]=args.gpu
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-from torch.optim import lr_scheduler
-from torch.autograd import Variable
-
-import torchvision
-from torchvision import datasets, transforms
-import videotransforms
-
+import os
 
 import numpy as np
+import torch
+from torchvision import transforms
 
+import videotransforms
+from charades_dataset_full import Charades as Dataset
 from pytorch_i3d import InceptionI3d
 
-from charades_dataset_full import Charades as Dataset
 
-
-def run(max_steps=64e3, mode='rgb', root='/ssd2/charades/Charades_v1_rgb', split='charades/charades.json', batch_size=1, load_model='', save_dir=''):
+def run(
+        max_steps=64e3,
+        mode='rgb',
+        root='/ssd2/charades/Charades_v1_rgb',
+        split='charades/charades.json',
+        batch_size=1,
+        load_model='',
+        save_dir=''):
     # setup dataset
     test_transforms = transforms.Compose([videotransforms.CenterCrop(224)])
 
     dataset = Dataset(split, 'training', root, mode, test_transforms, num=-1, save_dir=save_dir)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True)
+    dataloader = torch.utils.data.DataLoader(
+        dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
-    val_dataset = Dataset(split, 'testing', root, mode, test_transforms, num=-1, save_dir=save_dir)
-    val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True)    
+    val_dataset = Dataset(
+        split, 'testing', root, mode, test_transforms, num=-1, save_dir=save_dir)
+    val_dataloader = torch.utils.data.DataLoader(
+        val_dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
     dataloaders = {'train': dataloader, 'val': val_dataloader}
     datasets = {'train': dataset, 'val': val_dataset}
 
-    
     # setup the model
     if mode == 'flow':
         i3d = InceptionI3d(400, in_channels=2)
@@ -75,16 +62,27 @@ def run(max_steps=64e3, mode='rgb', root='/ssd2/charades/Charades_v1_rgb', split
                 for start in range(1, t-56, 1600):
                     end = min(t-1, start+1600+56)
                     start = max(1, start-48)
-                    ip = Variable(torch.from_numpy(inputs.numpy()[:,:,start:end]).cuda(), volatile=True)
+                    ip = torch.from_numpy(inputs.numpy()[:,:,start:end]).cuda()
                     features.append(i3d.extract_features(ip).squeeze(0).permute(1,2,3,0).data.cpu().numpy())
                 np.save(os.path.join(save_dir, name[0]), np.concatenate(features, axis=0))
             else:
-                # wrap them in Variable
-                inputs = Variable(inputs.cuda(), volatile=True)
+                inputs = inputs.cuda()
                 features = i3d.extract_features(inputs)
                 np.save(os.path.join(save_dir, name[0]), features.squeeze(0).permute(1,2,3,0).data.cpu().numpy())
 
 
 if __name__ == '__main__':
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-mode', type=str, help='rgb or flow')
+    parser.add_argument('-load_model', type=str)
+    parser.add_argument('-root', type=str)
+    parser.add_argument('-gpu', type=str)
+    parser.add_argument('-save_dir', type=str)
+
+    args = parser.parse_args()
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+
     # need to add argparse
     run(mode=args.mode, root=args.root, load_model=args.load_model, save_dir=args.save_dir)
