@@ -23,3 +23,19 @@ This relied on having the optical flow and RGB frames extracted and saved as ima
 
 ## Feature Extraction
 [extract_features.py](extract_features.py) contains the code to load a pre-trained I3D model and extract the features and save the features as numpy arrays. The [charades_dataset_full.py](charades_dataset_full.py) script loads an entire video to extract per-segment features.
+
+
+# SPyNet
+Source code was partialy taken from [pytorch-spynet](https://github.com/sniklaus/pytorch-spynet) repository, which contains the implementation of the SPyNet introduced in [1].
+
+<a href="https://arxiv.org/abs/1611.00850" rel="Paper"><img src="http://www.arxiv-sanity.com/static/thumbs/1611.00850v1.pdf.jpg" alt="Paper" width="100%"></a>
+
+## references
+```
+[1]  @inproceedings{Ranjan_CVPR_2017,
+         author = {Ranjan, Anurag and Black, Michael J.},
+         title = {Optical Flow Estimation Using a Spatial Pyramid Network},
+         booktitle = {IEEE Conference on Computer Vision and Pattern Recognition},
+         year = {2017}
+     }
+```
