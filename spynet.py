@@ -1,16 +1,26 @@
 #!/usr/bin/env python
 
+import getopt
+import math
+import sys
+
+import PIL.Image
+import cv2
+import numpy
 import torch
 import torch.utils.serialization
 
-import getopt
-import math
-from torch import nn
-import numpy
-import os
-import PIL
-import PIL.Image
-import sys
+##########################################################
+
+assert (int(torch.__version__.replace('.', '')) >= 40)  # requires at least pytorch version 0.4.0
+
+torch.set_grad_enabled(False)  # make sure to not compute gradients for computational performance
+
+torch.cuda.device(1)  # change this if you have a multiple graphics cards and you want to utilize them
+
+torch.backends.cudnn.enabled = True  # make sure to use cudnn for computational performance
+
+##########################################################
 
 arguments_strModel = 'sintel-final'
 arguments_strFirst = './images/first.png'
@@ -29,117 +39,128 @@ getopt.getopt(sys.argv[1:], '', [strParameter[2:] + '=' for strParameter in sys.
 
 ##########################################################
 
-class Preprocess(nn.Module):
+class Network(torch.nn.Module):
     def __init__(self):
-        super().__init__()
+        super(Network, self).__init__()
 
-    def forward(self, x):
-        r = (x[:, 0:1, :, :] - 0.406) / 0.225
-        g = (x[:, 1:2, :, :] - 0.456) / 0.224
-        b = (x[:, 2:3, :, :] - 0.485) / 0.229
+        class Preprocess(torch.nn.Module):
+            def __init__(self):
+                super(Preprocess, self).__init__()
 
-        return torch.cat([r, g, b], 1)
+            # end
+
+            def forward(self, tensorInput):
+                tensorBlue = (tensorInput[:, 0:1, :, :] - 0.406) / 0.225
+                tensorGreen = (tensorInput[:, 1:2, :, :] - 0.456) / 0.224
+                tensorRed = (tensorInput[:, 2:3, :, :] - 0.485) / 0.229
+
+                return torch.cat([tensorRed, tensorGreen, tensorBlue], 1)
+        # end
+
+        # end
+
+        class Basic(torch.nn.Module):
+            def __init__(self, intLevel):
+                super(Basic, self).__init__()
+
+                self.moduleBasic = torch.nn.Sequential(
+                    torch.nn.Conv2d(in_channels=8, out_channels=32, kernel_size=7, stride=1, padding=3),
+                    torch.nn.ReLU(inplace=False),
+                    torch.nn.Conv2d(in_channels=32, out_channels=64, kernel_size=7, stride=1, padding=3),
+                    torch.nn.ReLU(inplace=False),
+                    torch.nn.Conv2d(in_channels=64, out_channels=32, kernel_size=7, stride=1, padding=3),
+                    torch.nn.ReLU(inplace=False),
+                    torch.nn.Conv2d(in_channels=32, out_channels=16, kernel_size=7, stride=1, padding=3),
+                    torch.nn.ReLU(inplace=False),
+                    torch.nn.Conv2d(in_channels=16, out_channels=2, kernel_size=7, stride=1, padding=3)
+                )
+
+            # end
+
+            def forward(self, tensorInput):
+                return self.moduleBasic(tensorInput)
+        # end
+
+        # end
+
+        class Backward(torch.nn.Module):
+            def __init__(self):
+                super(Backward, self).__init__()
+
+            # end
+
+            def forward(self, tensorInput, tensorFlow):
+                if hasattr(self, 'tensorGrid') == False or self.tensorGrid.size(0) != tensorFlow.size(
+                        0) or self.tensorGrid.size(2) != tensorFlow.size(2) or self.tensorGrid.size(
+                        3) != tensorFlow.size(3):
+                    tensorHorizontal = torch.linspace(-1.0, 1.0, tensorFlow.size(3)).view(1, 1, 1,
+                                                                                          tensorFlow.size(3)).expand(
+                        tensorFlow.size(0), -1, tensorFlow.size(2), -1)
+                    tensorVertical = torch.linspace(-1.0, 1.0, tensorFlow.size(2)).view(1, 1, tensorFlow.size(2),
+                                                                                        1).expand(tensorFlow.size(0),
+                                                                                                  -1, -1,
+                                                                                                  tensorFlow.size(3))
+
+                    self.tensorGrid = torch.cat([tensorHorizontal, tensorVertical], 1).cuda()
+                # end
+
+                tensorFlow = torch.cat([tensorFlow[:, 0:1, :, :] / ((tensorInput.size(3) - 1.0) / 2.0),
+                                        tensorFlow[:, 1:2, :, :] / ((tensorInput.size(2) - 1.0) / 2.0)], 1)
+
+                return torch.nn.functional.grid_sample(input=tensorInput,
+                                                       grid=(self.tensorGrid + tensorFlow).permute(0, 2, 3, 1),
+                                                       mode='bilinear', padding_mode='border')
+        # end
+
+        # end
+
+        self.modulePreprocess = Preprocess()
+
+        self.moduleBasic = torch.nn.ModuleList([Basic(intLevel) for intLevel in range(6)])
+
+        self.moduleBackward = Backward()
+
+        self.load_state_dict(torch.load('./weights/spynet/network-' + arguments_strModel + '.pytorch'))
+
+    # end
+
+    def forward(self, tensorFirst, tensorSecond):
+        tensorFlow = []
+
+        tensorFirst = [self.modulePreprocess(tensorFirst)]
+        tensorSecond = [self.modulePreprocess(tensorSecond)]
+
+        for intLevel in range(5):
+            if tensorFirst[0].size(2) > 32 or tensorFirst[0].size(3) > 32:
+                tensorFirst.insert(0, torch.nn.functional.avg_pool2d(input=tensorFirst[0], kernel_size=2, stride=2))
+                tensorSecond.insert(0, torch.nn.functional.avg_pool2d(input=tensorSecond[0], kernel_size=2, stride=2))
+        # end
+        # end
+
+        tensorFlow = tensorFirst[0].new_zeros(tensorFirst[0].size(0), 2, int(math.floor(tensorFirst[0].size(2) / 2.0)),
+                                              int(math.floor(tensorFirst[0].size(3) / 2.0)))
+
+        for intLevel in range(len(tensorFirst)):
+            tensorUpsampled = torch.nn.functional.interpolate(input=tensorFlow, scale_factor=2, mode='bilinear',
+                                                              align_corners=True) * 2.0
+
+            if tensorUpsampled.size(2) != tensorFirst[intLevel].size(2): tensorUpsampled = torch.nn.functional.pad(
+                input=tensorUpsampled, pad=[0, 0, 0, 1], mode='replicate')
+            if tensorUpsampled.size(3) != tensorFirst[intLevel].size(3): tensorUpsampled = torch.nn.functional.pad(
+                input=tensorUpsampled, pad=[0, 1, 0, 0], mode='replicate')
+
+            tensorFlow = self.moduleBasic[intLevel](torch.cat(
+                [tensorFirst[intLevel], self.moduleBackward(tensorSecond[intLevel], tensorUpsampled), tensorUpsampled],
+                1)) + tensorUpsampled
+        # end
+
+        return tensorFlow
+# end
 
 
-class Basic(nn.Module):
-    def __init__(self, level):
-        super().__init__()
+# end
 
-        self.model = nn.Sequential(
-            nn.Conv2d(in_channels=8, out_channels=32, kernel_size=7, stride=1, padding=3),
-            nn.ReLU(inplace=False),
-            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=7, stride=1, padding=3),
-            nn.ReLU(inplace=False),
-            nn.Conv2d(in_channels=64, out_channels=32, kernel_size=7, stride=1, padding=3),
-            nn.ReLU(inplace=False),
-            nn.Conv2d(in_channels=32, out_channels=16, kernel_size=7, stride=1, padding=3),
-            nn.ReLU(inplace=False),
-            nn.Conv2d(in_channels=16, out_channels=2, kernel_size=7, stride=1, padding=3)
-        )
-
-    def forward(self, x):
-        return self.model(x)
-
-
-class Backward(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x, flow):
-        if (
-            hasattr(self, 'tensorGrid') == False
-            or self.tensor_grid.size(0) != flow.size(0)
-            or self.tensor_grid.size(2) != flow.size(2)
-            or self.tensor_grid.size(3) != flow.size(3)
-        ):
-            horizontal = (torch
-                .linspace(-1.0, 1.0, flow.size(3))
-                .view(1, 1, 1, flow.size(3))
-                .expand(flow.size(0), -1, flow.size(2), -1))
-
-            vertical = (torch
-                .linspace(-1.0, 1.0, flow.size(2))
-                .view(1, 1, flow.size(2), 1)
-                .expand(flow.size(0), -1, -1, flow.size(3)))
-
-            self.tensor_grid = torch.cat([horizontal, vertical], 1).cuda()  # fixme: find a way to dynamically detect model device
-
-        flow = torch.cat([
-            flow[:, 0:1, :, :] / ((x.size(3) - 1.0) / 2.0),
-            flow[:, 1:2, :, :] / ((x.size(2) - 1.0) / 2.0),
-        ], 1)
-
-        return nn.functional.grid_sample(
-            input=x,
-            grid=(self.tensor_grid + flow).permute(0, 2, 3, 1),
-            mode='bilinear',
-            padding_mode='border'
-        )
-
-
-class SPyNet(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-
-        self.module_preprocess = Preprocess()
-
-        self.module_basic = nn.ModuleList([Basic(level) for level in range(6)])
-
-        self.module_backward = Backward()
-
-        self.load_state_dict(torch.load('./network-' + arguments_strModel + '.pytorch'))
-
-    def forward(self, x1, x2):
-        flow = []
-
-        x1 = [self.module_preprocess(x1)]
-        x2 = [self.module_preprocess(x2)]
-
-        for level in range(5):
-            if x1[0].size(2) > 32 or x1[0].size(3) > 32:
-                x1.insert(0, nn.functional.avg_pool2d(input=x1[0], kernel_size=2, stride=2))
-                x2.insert(0, nn.functional.avg_pool2d(input=x2[0], kernel_size=2, stride=2))
-
-        flow = x1[0].new_zeros(
-            x1[0].size(0), 2, int(math.floor(x1[0].size(2) / 2.0)), int(math.floor(x1[0].size(3) / 2.0)))
-
-        for level in range(len(x1)):
-            upsampled = nn.functional.interpolate(input=flow, scale_factor=2, mode='bilinear', align_corners=True) * 2.0
-
-            if upsampled.size(2) != x1[level].size(2):
-                upsampled = nn.functional.pad(input=upsampled, pad=[0, 0, 0, 1], mode='replicate')
-            if upsampled.size(3) != x1[level].size(3):
-                upsampled = nn.functional.pad(input=upsampled, pad=[0, 1, 0, 0], mode='replicate')
-
-            flow = self.module_basic[level](torch.cat([
-                x1[level], self.module_backward(x2[level], upsampled), upsampled
-            ], 1)) + upsampled
-
-        return flow
-
-
-moduleNetwork = SPyNet().cuda().eval()
+moduleNetwork = Network().cuda().eval()
 
 
 ##########################################################
@@ -153,10 +174,8 @@ def estimate(tensorFirst, tensorSecond):
     intWidth = tensorFirst.size(2)
     intHeight = tensorFirst.size(1)
 
-    assert (
-                intWidth == 1024)  # remember that there is no guarantee for correctness, comment this line out if you acknowledge this and want to continue
-    assert (
-                intHeight == 416)  # remember that there is no guarantee for correctness, comment this line out if you acknowledge this and want to continue
+    # assert (intWidth == 1024)  # remember that there is no guarantee for correctness, comment this line out if you acknowledge this and want to continue
+    # assert (intHeight == 416)  # remember that there is no guarantee for correctness, comment this line out if you acknowledge this and want to continue
 
     if True:
         tensorFirst = tensorFirst.cuda()
@@ -209,13 +228,15 @@ if __name__ == '__main__':
         numpy.array(PIL.Image.open(arguments_strSecond))[:, :, ::-1].transpose(2, 0, 1).astype(numpy.float32) * (
                     1.0 / 255.0))
 
-    tensorOutput = estimate(tensorFirst, tensorSecond)
+    tensorOutput = estimate(tensorFirst, tensorSecond).numpy()
 
-    objectOutput = open(arguments_strOut, 'wb')
+    mag, ang = cv2.cartToPolar(tensorOutput[0, ...], tensorOutput[1, ...])
+    hsv = numpy.zeros([tensorOutput.shape[1], tensorOutput.shape[2], 3])
+    hsv[..., 1] = 255
+    hsv[..., 0] = ang * 180 / numpy.pi / 2
+    hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
+    bgr = cv2.cvtColor(hsv.astype(numpy.uint8), cv2.COLOR_HSV2BGR)
 
-    numpy.array([80, 73, 69, 72], numpy.uint8).tofile(objectOutput)
-    numpy.array([tensorOutput.size(2), tensorOutput.size(1)], numpy.int32).tofile(objectOutput)
-    numpy.array(tensorOutput.numpy().transpose(1, 2, 0), numpy.float32).tofile(objectOutput)
-
-    objectOutput.close()
-# end
+    with open(arguments_strOut, 'wb') as img_fp:
+        img = PIL.Image.fromarray(bgr)
+        img.save(img_fp, format='JPEG')
