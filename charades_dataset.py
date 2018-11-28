@@ -1,8 +1,8 @@
 import json
 import os
 import os.path
-import random
-
+import math
+import pandas as pd
 import cv2
 import numpy as np
 import torch
@@ -90,13 +90,61 @@ def make_dataset(split_file, split, root, mode, num_classes=157):
 
 class Charades(Dataset):
 
-    def __init__(self, split_file, split, root, mode, transforms=None):
+    @staticmethod
+    def preprocess_csv(df):
+        df = df.join(df['actions'].str.split(';', expand=True))
+        df.drop('actions', axis=1, inplace=True)
+        df = df.melt(id_vars=['id'])
+        df.drop('variable', axis=1, inplace=True)
+        df.sort_values('id', inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        df.dropna(inplace=True)
 
-        self.data = make_dataset(split_file, split, root, mode)
-        self.split_file = split_file
-        self.transforms = transforms
-        self.mode = mode
-        self.root = root
+        # df.columns == ['id', 'value']
+
+        df = df.join(df['value'].str.split(' ', expand=True))
+        df.drop('value', axis=1, inplace=True)
+        df.rename({0: 'target', 1: 'start', 2: 'end'}, axis=1, inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        df['start'] = df['start'].astype(np.float32)
+        df['end'] = df['end'].astype(np.float32)
+
+        return df  # df.columns == ['id', 'target', 'start', 'end']
+
+    @staticmethod
+    def target_to_integer(target_: str):
+        return int(target_[1:], base=10)
+
+    def __init__(
+        self,
+        data_csv_path,
+        data_directory,
+        transformation=None,
+        video_ext='.mp4',
+        random_start=True,
+        frame_step=1,
+        batch_size=64,
+        random_seed=42,
+    ):
+        """
+        Charades Dataset
+        :param data_csv_path: path to Charades_v1_<train/test>.csv
+        :param data_directory: path to Charades_v1_480 directory (directory with video files)
+        :param transformation: transformation
+        :param video_ext: extinsion of video files
+        :param random_start: first frame of sequence will be choosen randomly
+        :param frame_step: if bigger than 1, each frame_step-th frame will be returned
+        :param batch_size: number of frames over temporal dimension
+        :param random_seed: random seed
+        """
+        self.data = self.preprocess_csv(pd.read_csv(data_csv_path, usecols=['id', 'actions']))
+        self.data_directory = data_directory if data_directory.endswith('/') else data_directory + '/'
+        self.transformation = transformation
+        self.video_ext = video_ext
+        self.random_start = random_start
+        self.frame_step = frame_step
+        self.batch_size = batch_size
+        self.random_state = np.random.RandomState(random_seed)
 
     def __getitem__(self, index):
         """
@@ -104,20 +152,37 @@ class Charades(Dataset):
             index (int): Index
 
         Returns:
-            tuple: (image, target) where target is class_index of the target class.
+            tuple: (video (batch of 64 frames, small videos will be repeated to acheave 64 frames length), target)
+            where target is class_index of the target class.
         """
-        vid, label, dur, nf = self.data[index]
-        start_f = random.randint(1, nf - 65)
+        video_id, target_, start, end = tuple(self.data.loc[index, ['id', 'target', 'start', 'end']])
+        video_capture = cv2.VideoCapture(f'{self.data_directory}{video_id}{self.video_ext}')
+        fps = video_capture.get(cv2.CAP_PROP_FPS)
+        frames_in_interval = math.floor((end - start) * fps)
+        gap = max(0, frames_in_interval - self.batch_size)
 
-        if self.mode == 'rgb':
-            imgs = load_rgb_frames(self.root, vid, start_f, 64)
-        else:
-            imgs = load_flow_frames(self.root, vid, start_f, 64)
-        label = label[:, start_f:start_f + 64]
+        if self.random_start:
+            start += self.random_state.randint(gap + 1)/fps
 
-        imgs = self.transforms(imgs)
+        frames = []
+        video_capture.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
+        frames_captured = 0
+        while frames_captured < self.batch_size:
+            if end * 1000 < video_capture.get(cv2.CAP_PROP_POS_MSEC):
+                video_capture.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
 
-        return video_to_tensor(imgs), torch.from_numpy(label)
+            _, frame = video_capture.read()
+
+            if frame is not None:
+                frames.append(frame)
+                frames_captured += 1
+            else:
+                video_capture.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
+
+        frames = np.array(frames, dtype=np.float32)
+        if self.transformation is not None:
+            frames = self.transformation(frames)
+        return frames, self.target_to_integer(target_)
 
     def __len__(self):
-        return len(self.data)
+        return len(self.data.index)
